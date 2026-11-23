@@ -1,0 +1,6 @@
+-- Optional private employee/client key seed data.
+--
+-- Do not commit real employee names, employee IDs, issued gateway keys, or
+-- api_key_hash values here. Keep the real seed file in a private location such
+-- as Obsidian/secret storage, and copy it into this path only for private
+-- deployment or local recovery.

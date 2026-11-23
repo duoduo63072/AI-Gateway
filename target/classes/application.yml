@@ -1,0 +1,126 @@
+server:
+  port: ${SERVER_PORT:8080}
+  # 优雅停机：收到停机信号后先停止接新请求，让在途请求(含 SSE 流式回答)处理完再退出。
+  # 配合 SAE/负载均衡的「连接排水 + 分批发布」实现用户无感发布。
+  shutdown: graceful
+
+spring:
+  application:
+    name: ai-gateway
+  # 优雅停机最长等待时间：应 ≥ 单次流式回答的最长耗时(含 pm-agent 多轮工具)，避免长回答被中断。
+  lifecycle:
+    timeout-per-shutdown-phase: ${SHUTDOWN_TIMEOUT:90s}
+  codec:
+    # 放宽内存缓冲上限，容纳较大的非流式请求/响应体
+    max-in-memory-size: 16MB
+  r2dbc:
+    url: r2dbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:ai_gateway}
+    username: ${DB_USER:gateway}
+    password: ${DB_PASSWORD:gateway}
+    pool:
+      enabled: true
+      initial-size: 5
+      max-size: 20
+      max-idle-time: 30m
+
+gateway:
+  auth:
+    enabled: ${GATEWAY_AUTH_ENABLED:true}
+    # 引导用主密钥（可选）。生产留空，改用 DB 中管理的客户端 Key。
+    master-key: ${GATEWAY_MASTER_KEY:}
+  capture:
+    enabled: ${GATEWAY_CAPTURE_ENABLED:true}
+    max-completion-chars: 1000000
+  quota:
+    # 按员工月度成本额度的「超额对话内告警」。关掉则完全不查额度、零开销。
+    # 生效前提：model_pricing 填了真实单价、api_client.monthly_quota_cny 设了额度。
+    enabled: ${GATEWAY_QUOTA_ENABLED:true}
+    # 本月成本内存缓存(秒)。规模小，60s 足够，避免每请求查库。
+    cache-ttl-seconds: ${GATEWAY_QUOTA_CACHE_TTL:60}
+  model-mapping:
+    # Claude Code 按百炼官方配置会直接发 qwen3.x 模型名（以 "qwen" 开头者直接透传）。
+    # 以下为客户端发「标准 Claude 模型名」时的兜底映射；未命中则用 default-model。
+    default-model: ${DEFAULT_UPSTREAM_MODEL:qwen3.7-max}
+    mappings:
+      claude-3-5-haiku-20241022: qwen3.6-flash
+      claude-3-haiku-20240307: qwen3.6-flash
+      claude-3-5-sonnet-20241022: qwen3.7-max
+      claude-3-7-sonnet-20250219: qwen3.7-max
+      claude-sonnet-4-20250514: qwen3.7-max
+      claude-opus-4-20250514: qwen3.7-max
+  dashscope:
+    # 上游百炼 Token Plan MaaS（Anthropic 报文端点）。base-url 仅含 scheme+host，完整路径见 *-path。
+    base-url: ${DASHSCOPE_BASE_URL:https://token-plan.cn-beijing.maas.aliyuncs.com}
+    messages-path: ${DASHSCOPE_MESSAGES_PATH:/apps/anthropic/v1/messages}
+    count-tokens-path: ${DASHSCOPE_COUNT_TOKENS_PATH:/apps/anthropic/v1/messages/count_tokens}
+    anthropic-version: ${ANTHROPIC_VERSION:2023-06-01}
+    # OpenAI 兼容模式路径（已休眠，保留以备回退）。
+    chat-path: /compatible-mode/v1/chat/completions
+    api-key: ${DASHSCOPE_API_KEY:}
+    response-timeout: 120s
+
+# 虚拟员工（PM 数字员工）模块：读 chat_log → 调百炼出"个人工作摘要 + 项目进度"。
+# enabled 默认 false——不开启时定时器与 /api/worker 报告接口都不注册，对网关零影响。
+# ⚠️ 摘要源自员工 AI 对话，属敏感数据，开启前请确认访问控制与合规。
+digital-worker:
+  enabled: ${DIGITAL_WORKER_ENABLED:false}
+  schedule:
+    enabled: ${DIGITAL_WORKER_SCHEDULE_ENABLED:true}
+    # 每日凌晨 02:00 分析前一天（最终定稿）。
+    daily-cron: ${DIGITAL_WORKER_DAILY_CRON:0 0 2 * * *}
+    # 工作日 10:00–18:00 每小时整点分析"当天"，保持新鲜。置 "-" 关闭。
+    intraday-cron: ${DIGITAL_WORKER_INTRADAY_CRON:0 0 10-18 * * MON-FRI}
+  analysis:
+    model: ${DIGITAL_WORKER_MODEL:qwen3.7-max}
+    max-conversations-per-employee: ${DIGITAL_WORKER_MAX_CONVERSATIONS:40}
+    max-chars-per-conversation: ${DIGITAL_WORKER_MAX_CHARS:1200}
+    concurrency: ${DIGITAL_WORKER_CONCURRENCY:3}
+    max-tokens: ${DIGITAL_WORKER_MAX_TOKENS:1500}
+  # pm-agent 对话式数字员工：Claude Code 把 model 设为下列名字即路由到它（不透传百炼）。
+  agent:
+    model-names: ${DIGITAL_WORKER_AGENT_MODELS:pm-agent}
+    model: ${DIGITAL_WORKER_AGENT_MODEL:qwen3.7-max}
+    max-tokens: ${DIGITAL_WORKER_AGENT_MAX_TOKENS:1500}
+    max-tool-iterations: ${DIGITAL_WORKER_AGENT_MAX_ITERS:4}
+    default-lookback-days: ${DIGITAL_WORKER_AGENT_LOOKBACK_DAYS:7}
+    # 真流式：流式请求逐 token 实时吐回；false 回退为整段答案合成一段 SSE。
+    stream-enabled: ${DIGITAL_WORKER_AGENT_STREAM_ENABLED:true}
+    # refresh_data 防抖：此窗口内刚分析过则跳过（说一句“更新”不会重复跑）。
+    refresh-debounce: ${DIGITAL_WORKER_AGENT_REFRESH_DEBOUNCE:10m}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        # 仅暴露健康检查。metrics/prometheus 走 OTLP 推送，不开 HTTP pull 端点；
+        # info 会泄露构建信息——actuator 经 nginx 直达公网，故收窄暴露面避免无鉴权信息泄露。
+        include: health
+  endpoint:
+    health:
+      # 暴露 /actuator/health/liveness 与 /readiness（默认两组都只看应用存活态、不含 db）。
+      # ⚠️ 健康检查(SAE/CLB)请指向 /actuator/health/liveness：RDS 掐空闲连接会让 /actuator/health
+      #    偶发 DOWN，若拿它做健康检查会误踢健康节点；且两台 ECS 共用同一 RDS，DB 真挂时踢节点也无济于事
+      #    （应交给监控告警，而非负载均衡）。
+      probes:
+        enabled: true
+  otlp:
+    tracing:
+      endpoint: ${OTLP_TRACES_ENDPOINT:http://localhost:4318/v1/traces}
+    metrics:
+      export:
+        # 本地无 collector 时默认不推送，避免每 10s 连 :4318 失败刷屏；
+        # docker-compose 内有 otel-collector，置 OTLP_METRICS_EXPORT=true 开启。
+        enabled: ${OTLP_METRICS_EXPORT:false}
+        url: ${OTLP_METRICS_ENDPOINT:http://localhost:4318/v1/metrics}
+        step: 10s
+  tracing:
+    # 采样率默认 0：本地不采样即不导出 span（无 collector）。docker 置 OTEL_SAMPLING=1.0 全采样。
+    # 用 0 而非关 tracing，保留 Tracer Bean，避免下游注入失败。
+    sampling:
+      probability: ${OTEL_SAMPLING:0.0}
+
+logging:
+  level:
+    com.company.aigateway: INFO
+    com.company.digitalworker: INFO
+    org.springframework.r2dbc: WARN
