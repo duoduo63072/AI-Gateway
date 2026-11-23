@@ -1,0 +1,17 @@
+version: '3'
+services:
+  ai-gateway:
+    image: registry.cn-shanghai.aliyuncs.com/honyar-iot/ai-gateway:latest
+    container_name: ai-gateway
+    restart: unless-stopped
+    ports:
+      - "8091:8080"
+    env_file:
+      - /opt/ai-gateway/.env
+    stop_grace_period: 95s
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/actuator/health/readiness || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 9
+      start_period: 30s

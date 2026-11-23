@@ -1,0 +1,82 @@
+sources:
+  repo_0:
+    type: codeup
+    name: ai-gateway
+    endpoint: https://codeup.aliyun.com/5f4477175fd102f22f6bbe54/smart-home-v3-group/ai-gateway.git
+    branch: main
+    triggerEvents:
+    - push
+    branchFilter: main
+    certificate:
+      type: serviceConnection
+      serviceConnection: a9ad7ryny1jot7kh
+defaultWorkspace: repo_0
+stages:
+  stage_0:
+    name: 构建
+    jobs:
+      job_0:
+        name: 镜像构建并推送 ACR
+        runsOn:
+          group: public/cn-beijing
+        steps:
+          step_0:
+            name: Maven 构建
+            step: JavaBuild
+            with:
+              jdkVersion: '17'
+              mavenVersion: 3.9.3
+              run: mvn -q -B -DskipTests clean package
+          step_1:
+            name: 镜像构建并推送至阿里云镜像仓库
+            step: ACRDockerBuild
+            with:
+              artifact: artifact
+              variables: []
+              dockerfilePath: Dockerfile
+              noCache: false
+              dockerRegistry: registry.cn-shanghai.aliyuncs.com/honyar-iot/ai-gateway
+              dockerTag: ${DATETIME}
+              region: cn-shanghai
+              serviceConnection: ox4mz4btdsfcu9st
+              extraTags:
+              - latest
+        driven: auto
+        plugins: []
+  stage_1:
+    name: 部署
+    jobs:
+      job_0:
+        name: Docker 部署
+        component: VMDockerDeploy
+        driven: auto
+        with:
+          variables: []
+          useEncode: false
+          pauseStrategy: firstBatchPause
+          machineGroup: t2EsxSdE4UcuJEyn
+          run: |+
+            # 确保 compose 目录存在
+            mkdir -p /opt/ai-gateway
+
+            # 从仓库同步生产 compose 文件到服务器
+            cp /root/workspace/repo_0/docker-compose.prod.yml /opt/ai-gateway/docker-compose.prod.yml
+
+            # 生产密钥不进镜像/代码仓库，需提前放在服务器私有环境文件中
+            test -f /opt/ai-gateway/.env || {
+              echo "Missing /opt/ai-gateway/.env with production secrets" >&2
+              exit 1
+            }
+
+            # 拉取最新镜像
+            docker-compose -f /opt/ai-gateway/docker-compose.prod.yml pull ai-gateway
+
+            # 定点重启：仅重建 ai-gateway 容器
+            docker-compose -f /opt/ai-gateway/docker-compose.prod.yml up -d --no-deps ai-gateway
+
+            # 清理虚悬镜像释放磁盘空间
+            docker image prune -f
+
+          executeUser: root
+          batchNumber: 2
+        plugins: []
